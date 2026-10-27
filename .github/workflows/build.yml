@@ -1,0 +1,144 @@
+name: Build MTW Engine (wine-crossover 26.3.0 + GPTK 3.0 redist)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: 10.15
+  CX_SOURCE_URL: https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz
+  GPTK_URL: https://github.com/Gcenx/game-porting-toolkit/releases/download/Game-Porting-Toolkit-3.0-3/game-porting-toolkit-3.0-3.tar.xz
+  WINE_MONO_URL: https://github.com/wine-mono/wine-mono/releases/download/wine-mono-10.4.0/wine-mono-10.4.0-x86.tar.xz
+  WINE_GECKO_URL: https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.tar.xz
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install build dependencies
+        run: |
+          brew install bison flex freetype pkg-config gettext gnutls \
+            gstreamer gst-plugins-base gst-plugins-good jpeg libpng libtiff \
+            libffi libpcap sdl2 molten-vk mingw-w64
+
+      - name: download & extract wine-crossover 26.3.0 sources
+        run: |
+          curl -fL "$CX_SOURCE_URL" -o cx.tar.gz
+          tar -xzf cx.tar.gz
+          ls sources/wine/VERSION && cat sources/wine/VERSION
+
+      - name: download & extract GPTK 3.0 redist
+        run: |
+          curl -fL "$GPTK_URL" -o gptk.tar.xz
+          mkdir gptk && tar -xf gptk.tar.xz -C gptk
+          find gptk -maxdepth 3 -type d | head -20
+
+      - name: locate redist lib
+        id: redist
+        run: |
+          RDIR=$(dirname "$(find gptk -name "D3DMetal.framework" | head -1)")
+          echo "dir=$RDIR" >> "$GITHUB_OUTPUT"
+          echo "redist lib dir: $RDIR"
+          ls "$RDIR" | head -20
+
+      - name: configure wine
+        working-directory: cxbuild
+        run: |
+          mkdir -p cxbuild
+          cd cxbuild
+          export PATH="/usr/local/opt/bison/bin:$PATH"
+          export PKG_CONFIG_PATH="/usr/local/opt/libpcap/lib/pkgconfig"
+          export i386_CC=i686-w64-mingw32-gcc
+          export x86_64_CC=x86_64-w64-mingw32-gcc
+          export CFLAGS="-O2 -Wno-deprecated-declarations -Wno-unguarded-availability"
+          export CXXFLAGS="-O2 -Wno-deprecated-declarations -Wno-unguarded-availability"
+          export LDFLAGS="-Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../ -Wl,-rpath,@loader_path/../../external"
+          export ac_cv_lib_soname_MoltenVK=libMoltenVK.dylib
+          export ac_cv_lib_soname_vulkan=""
+          ../sources/wine/configure \
+            --prefix= \
+            --disable-tests \
+            --enable-archs=i386,x86_64 \
+            --with-mingw \
+            --without-alsa \
+            --without-capi \
+            --with-coreaudio \
+            --with-cups \
+            --without-dbus \
+            --with-freetype \
+            --with-gettext \
+            --without-gettextpo \
+            --without-gphoto \
+            --with-gnutls \
+            --without-gssapi \
+            --with-gstreamer \
+            --without-krb5 \
+            --without-netapi \
+            --with-opencl \
+            --without-opengl \
+            --without-oss \
+            --with-pcap \
+            --with-pthread \
+            --without-pulse \
+            --without-sane \
+            --with-sdl \
+            --without-udev \
+            --without-usb \
+            --without-v4l2 \
+            --with-vulkan \
+            --without-x
+
+      - name: build wine
+        working-directory: cxbuild
+        run: |
+          export PATH="/usr/local/opt/bison/bin:$PATH"
+          make -j4
+
+      - name: install into staging dir
+        working-directory: cxbuild
+        run: |
+          make install-lib DESTDIR="$GITHUB_WORKSPACE/install"
+          # wine64 wrapper for compatibility with tools expecting it
+          cat > "$GITHUB_WORKSPACE/install/bin/wine64" << 'EOF'
+          #!/usr/bin/env bash
+          set -e
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec "$DIR/wine" "$@"
+          EOF
+          chmod +x "$GITHUB_WORKSPACE/install/bin/wine64"
+
+      - name: add wine mono & gecko
+        run: |
+          mkdir -p install/share/wine/mono install/share/wine/gecko
+          curl -fL "$WINE_MONO_URL" | tar -xJ -C install/share/wine/mono || echo "mono fetch failed (non-fatal)"
+          curl -fL "$WINE_GECKO_URL" | tar -xJ -C install/share/wine/gecko || echo "gecko fetch failed (non-fatal)"
+
+      - name: assemble Engine
+        run: |
+          mkdir -p Engine/wine
+          ditto --rsrc install Engine/wine
+          # GPTK redist -> wine/lib/external (D3DMetal.framework, libd3dshared.dylib, Apple PE dlls)
+          mkdir -p Engine/wine/lib/external
+          ditto "${{ steps.redist.outputs.dir }}/" Engine/wine/lib/external/
+          ls Engine/wine/lib/external | head
+          cp Properties.plist Engine/Properties.plist
+
+      - name: bundle dylib dependencies
+        run: |
+          chmod +x .github/dylib_bundler.zsh
+          ENGINE_DIR=Engine/wine .github/dylib_bundler.zsh
+
+      - name: compress engine artifact
+        run: |
+          tar -cf Engine.tar.xz -C Engine --use-compress-program="xz -9 -T0" .
+          ls -la Engine.tar.xz
+
+      - name: upload engine artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: Engine
+          path: Engine.tar.xz
