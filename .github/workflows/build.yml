@@ -46,7 +46,6 @@ jobs:
           ls "$RDIR" | head -20
 
       - name: configure wine
-        working-directory: cxbuild
         run: |
           mkdir -p cxbuild
           cd cxbuild
@@ -93,14 +92,14 @@ jobs:
             --without-x
 
       - name: build wine
-        working-directory: cxbuild
         run: |
+          cd cxbuild
           export PATH="/usr/local/opt/bison/bin:$PATH"
           make -j4
 
       - name: install into staging dir
-        working-directory: cxbuild
         run: |
+          cd cxbuild
           make install-lib DESTDIR="$GITHUB_WORKSPACE/install"
           # wine64 wrapper for compatibility with tools expecting it
           cat > "$GITHUB_WORKSPACE/install/bin/wine64" << 'EOF'
